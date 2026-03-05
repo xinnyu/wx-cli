@@ -58,104 +58,27 @@
 2. 安装 Frida：`pip3 install frida-tools` 或 `brew install frida`
 3. 管理员密码（sudo 权限）
 
-### macOS 权限模型详解
+### macOS 权限要求
 
-Frida 附加到微信进程需要调用 `task_for_pid()` 这个 Mach 内核接口。macOS 的 `taskgated` 守护进程控制谁能调用它，核心逻辑取决于**目标进程的代码签名状态**：
+密钥提取需要调用 `task_for_pid()`，能否成功取决于**微信 App 的代码签名状态**：
 
-```
-taskgated 授权检查流程:
+- **Ad-hoc 签名**（如安装了防撤回补丁）：`sudo` 即可，SSH 也行
+- **Apple 官方签名**（有 Hardened Runtime）：需要本机 Terminal + sudo，SSH 不可行
 
-调用者 sudo task_for_pid(target_pid)
-         │
-         ▼
-┌─ 目标进程有 Hardened Runtime 吗？──────────────────────────┐
-│                                                            │
-│  YES (flags 包含 0x10000 runtime)                          │
-│  → Apple 官方签名的 App, 如 App Store 下载的微信              │
-│  → taskgated 严格模式:                                      │
-│     1. 调用者必须是 root (sudo)                              │
-│     2. 调用者的"负责应用"必须有 TCC DeveloperTool 授权          │
-│     3. SSH 上下文的负责应用是 sshd → 无法获得 TCC 授权          │
-│     4. 本机 Terminal 可以弹窗获得 TCC 授权 ✅                  │
-│     → SSH 永远失败，本机 Terminal + sudo 可以                  │
-│                                                            │
-│  NO (Ad-hoc 签名, 或无 hardened runtime)                    │
-│  → 自签名/防撤回补丁修改过的 App                               │
-│  → taskgated 宽松模式:                                      │
-│     1. 调用者是 root (sudo) 即可 ✅                           │
-│     2. 不检查 TCC DeveloperTool                              │
-│     3. SSH sudo 也能成功! ✅                                  │
-│                                                            │
-└────────────────────────────────────────────────────────────┘
-```
-
-#### 🔑 关键发现：决定因素是目标 App 的签名，不是终端的权限！
-
-我们实测发现：
-
-| 场景 | WeChat 签名 | codesign flags | sudo task_for_pid | SSH 可行? |
-|------|------------|----------------|-------------------|-----------|
-| MacBook (macOS 15.x) | **Ad-hoc** (防撤回补丁自签名) | `0x2(adhoc)` | ✅ 直接成功 | ✅ **可行** |
-| Mac mini (Catalina) | Apple 官方签名 | `runtime` | ✅ 本机 Terminal | ❌ SSH 失败 |
-| MacBook Pro (Big Sur) | Apple 官方签名 | `runtime` | ✅ 本机 Terminal | ❌ SSH 失败 |
-
-本机 WeChat 的签名信息（安装了防撤回补丁后）：
-```
-Signature=adhoc
-TeamIdentifier=not set
-flags=0x2(adhoc)          ← 没有 hardened runtime!
-Internal requirements=0   ← 没有签名要求
-Entitlements=无            ← 没有 entitlements
-```
-
-正常 Apple 签名的 WeChat：
-```
-Signature=Apple Developer
-TeamIdentifier=5A4RE8SF68
-flags=0x10002(adhoc,runtime)  ← 有 hardened runtime!
-```
-
-#### 这意味着什么？
-
-如果你想通过 SSH 远程提取密钥，有两条路：
-
-**方法 1: 对微信 App 重新签名 (推荐，不需要关 SIP)**
 ```bash
-# 在目标机器上执行（SSH 即可）：
-# 1. 去掉 hardened runtime，用 ad-hoc 重签名
-sudo codesign --force --deep --sign - /Applications/WeChat.app
-
-# 2. 重启微信 (需要用户在 GUI 操作，或用 kill + open)
-kill $(pgrep -x WeChat)
-# 用户需要在 GUI 上重新打开微信并登录
-
-# 3. 现在 SSH sudo 就能 task_for_pid 了！
-sudo ./find_all_keys_macos
+# 检查微信签名状态
+codesign -dv /Applications/WeChat.app 2>&1 | grep -E "Signature|flags"
+# Ad-hoc: flags=0x2(adhoc) → sudo 直接可用
+# Apple:  flags=0x10000(runtime) → 需本机 Terminal 或先重签名
 ```
 
-⚠️ **副作用**：
-- 重签名后微信可能无法自动更新
-- 某些 iCloud/Keychain 功能可能受影响
-- 微信小程序可能报安全错误
-- 需要重新登录微信
+如果需要 SSH 远程操作，可以重签名微信去掉 Hardened Runtime：
+```bash
+sudo codesign --force --deep --sign - /Applications/WeChat.app
+# 重启微信后 SSH sudo 即可提取密钥
+```
 
-**方法 2: 关闭 SIP (不推荐)**
-- 需要重启进入恢复模式
-- 安全风险大，影响整个系统
-
-#### 常见误区
-
-| 误区 | 真相 |
-|------|------|
-| "需要给终端完全磁盘访问才能调试" | ❌ FDA 控制文件访问，不控制进程调试。但 SSH 重签名 App 时需要 FDA |
-| "需要给终端开发者工具权限" | ⚠️ 仅当目标 App 有 hardened runtime 时才需要 |
-| "SSH 下永远无法 task_for_pid" | ❌ 如果目标 App 是 ad-hoc 签名的，SSH sudo 可以 |
-| "macOS 版本决定了能否 SSH 调试" | ❌ 主要取决于目标 App 的签名状态 |
-| "SIP 阻止了调试微信" | ❌ SIP 只保护系统进程，微信不受 SIP 保护 |
-| "加了 sshd 到 FDA 就行" | ❌ 还需要加 `/usr/libexec/sshd-keygen-wrapper`，且要重连 SSH |
-| "微信开着也能重签名" | ❌ 运行中的 binary/dylib 被占用，codesign 会失败 |
-
-> 📖 详细权限指南见 [macOS 权限完全指南](macos-permission-guide.md)
+> 📖 完整的权限模型、SSH 配置、常见误区详见 [macOS 权限完全指南](macos-permission-guide.md)
 
 ### 新手操作步骤
 
@@ -188,40 +111,22 @@ sudo codesign --force --deep --sign - /Applications/WeChat.app
 
 ### 实际操作步骤
 
-#### 步骤 1: 找到微信进程 PID
+#### 方法 A: 使用 C 版扫描器（推荐，4.x）
 
 ```bash
-pgrep -x WeChat
-# 输出例如: 51051
+# 编译
+cc -O2 -o find_all_keys_macos find_all_keys_macos.c -framework Foundation
+
+# 运行（自动查找微信进程、扫描内存、匹配 DB salt）
+sudo ./find_all_keys_macos
 ```
 
-#### 步骤 2: 准备 Frida 扫描脚本
+扫描器会在内存中搜索 `x'<64hex_key><32hex_salt>'` 格式的密钥，自动匹配 DB 文件的 salt，输出 `all_keys.json`。
 
-创建 `scan_keys.js`：
-
-```javascript
-// 扫描内存中所有看起来像加密密钥的 hex 字符串
-// WeChat 3.x: 64字符hex (32字节key)
-// WeChat 4.x: 也可能是64字符hex，或96字符hex (48字节)
-
-var ranges = Process.enumerateRanges('r--');
-var pattern_64 = /^[0-9a-f]{64}$/;
-
-ranges.forEach(function(range) {
-    try {
-        var buf = range.base.readByteArray(range.size);
-        // 实际扫描逻辑...扫描连续的hex字符
-    } catch(e) {}
-});
-```
-
-#### 步骤 3: 在本机 Terminal 用 Frida 注入
+#### 方法 B: 使用 Frida（3.x / 通用）
 
 ```bash
-# 方法 A: 用自己的脚本 (如果你已知内存地址)
-sudo frida -p $(pgrep -x WeChat) --debug -l debug.js
-
-# 方法 B: 用扫描脚本自动搜索
+# 附加到微信进程，手动 dump 内存搜索 32 字节密钥
 sudo frida -p $(pgrep -x WeChat) -l scan_keys.js
 ```
 
@@ -302,7 +207,7 @@ HMAC_LEN = 64
 #!/usr/bin/env python3
 """WeChat 3.x macOS 数据库解密器"""
 
-import hashlib, hmac, struct, os, shutil
+import hashlib, hmac, struct, shutil
 from Crypto.Cipher import AES
 
 def decrypt_page(page_data, enc_key, page_no, page_size, reserve):
@@ -323,7 +228,8 @@ def decrypt_page(page_data, enc_key, page_no, page_size, reserve):
         # 拼回 SQLite 头: "SQLite format 3\0" + 解密内容 + reserve填零
         return b'SQLite format 3\x00' + decrypted + b'\x00' * reserve
     else:
-        return decrypted + page_data[page_size - reserve:]
+        # Reserve 区填零（SQLite 不读取该区域，清零保持输出干净）
+        return decrypted + b'\x00' * reserve
 
 
 def verify_hmac_page1(page_data, enc_key, page_size, reserve):
@@ -359,21 +265,20 @@ def decrypt_db(db_path, raw_key_hex, output_path):
 
     salt = data[:16]
 
-    # 尝试的参数组合: (page_size, use_pbkdf2)
+    # 尝试的参数组合: (page_size, use_pbkdf2, reserve)
+    # SQLCipher 3 reserve = 48: IV(16) + HMAC-SHA1(20) + padding(12)
     configs = [
-        (1024, False),   # 大部分 DB
-        (4096, False),   # WebTemplate
-        (1024, True),    # FTS 索引
-        (4096, True),    # mediaData
+        (1024, False, 48),   # 大部分 DB
+        (4096, False, 48),   # WebTemplate
+        (1024, True,  48),   # FTS 索引
+        (4096, True,  48),   # mediaData
     ]
 
-    for page_size, use_pbkdf2 in configs:
+    for page_size, use_pbkdf2, reserve in configs:
         if use_pbkdf2:
             enc_key = hashlib.pbkdf2_hmac('sha1', raw_key, salt, 64000, dklen=32)
         else:
             enc_key = raw_key
-
-        reserve = 48  # SQLCipher 3 固定
 
         if verify_hmac_page1(data, enc_key, page_size, reserve):
             # HMAC 验证通过，开始解密
