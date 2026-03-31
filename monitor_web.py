@@ -1275,6 +1275,11 @@ class SessionMonitor:
             if is_new:
                 display = self.contact_names.get(username, username)
                 is_group = '@chatroom' in username
+                # 新群/新联系人不在缓存中时，重新加载联系人
+                if display == username and username not in self.contact_names:
+                    refreshed = load_contact_names()
+                    self.contact_names.update(refreshed)
+                    display = self.contact_names.get(username, username)
                 sender = ''
                 if is_group:
                     sender = self.contact_names.get(curr['sender'], curr['sender_name'] or curr['sender'])
