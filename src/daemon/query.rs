@@ -647,8 +647,12 @@ fn fmt_content(local_id: i64, local_type: i64, content: &str, is_group: bool) ->
     let base = (local_type as u64 & 0xFFFFFFFF) as i64;
     match base {
         3 => return format!("[图片] local_id={}", local_id),
+        34 => return "[语音]".into(),
+        43 => return "[视频]".into(),
         47 => return "[表情]".into(),
         50 => return "[通话]".into(),
+        10000 => return parse_sysmsg(content).unwrap_or_else(|| "[系统消息]".into()),
+        10002 => return parse_revoke(content).unwrap_or_else(|| "[撤回了一条消息]".into()),
         _ => {}
     }
 
@@ -664,6 +668,37 @@ fn fmt_content(local_id: i64, local_type: i64, content: &str, is_group: bool) ->
         }
     }
     text.to_string()
+}
+
+/// 解析撤回消息 XML，提取被撤回的内容摘要
+/// `<sysmsg type="revokemsg"><revokemsg><content>...</content></revokemsg></sysmsg>`
+fn parse_revoke(xml: &str) -> Option<String> {
+    let inner = extract_xml_text(xml, "content")?;
+    // 有时 content 是 "xxx recalled a message" 英文，有时是中文
+    if inner.is_empty() {
+        return Some("[撤回了一条消息]".into());
+    }
+    // 尝试简化：如果是 XML 格式的撤回内容，直接显示摘要
+    Some(format!("[撤回] {}", inner
+        .chars()
+        .take(30)
+        .collect::<String>()))
+}
+
+/// 解析系统消息 XML（群通知等）
+fn parse_sysmsg(xml: &str) -> Option<String> {
+    // 常见格式：<sysmsg type="...">...</sysmsg>
+    // 尝试提取 content 标签
+    if let Some(s) = extract_xml_text(xml, "content") {
+        if !s.is_empty() {
+            return Some(format!("[系统] {}", s.chars().take(50).collect::<String>()));
+        }
+    }
+    // 纯文本系统消息（无 XML）
+    if !xml.starts_with('<') {
+        return Some(format!("[系统] {}", xml.chars().take(50).collect::<String>()));
+    }
+    Some("[系统消息]".into())
 }
 
 fn parse_appmsg(text: &str) -> Option<String> {
