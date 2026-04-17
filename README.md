@@ -36,7 +36,7 @@ npx skills add jackwener/wx-cli -g
 
 - **零依赖安装** — 单一 Rust 二进制，一行命令装完
 - **毫秒级响应** — 后台 daemon 持久缓存解密数据库，mtime 不变则复用
-- **AI 友好** — 默认 YAML 输出，`--json` 切换为 JSON，方便 LLM agent 直接调用
+- **AI 友好** — 默认 YAML 输出，更省 token & 易读；`--json` 可切换为 JSON（方便 `jq` 处理等）
 - **完全本地** — 数据不出本机，实时解密，无需全量预解密
 
 ---
@@ -176,7 +176,7 @@ wx export "AI群" --since 2026-01-01 --format json
 
 ### 输出格式
 
-默认输出 YAML，加 `--json` 切换为 JSON（适合 AI agent / `jq` 处理）：
+默认输出 YAML，更省 token & 易读；`--json` 可切换为 JSON（方便 `jq` 处理等）：
 
 ```bash
 wx sessions --json

@@ -92,7 +92,7 @@ sudo wx init
 
 ## 命令速查
 
-所有命令默认输出 YAML。加 `--json` 切换为 JSON（适合程序处理）。
+所有命令默认输出 YAML，更省 token & 易读；`--json` 可切换为 JSON（方便 `jq` 处理等）。
 
 ### 会话与消息
 
